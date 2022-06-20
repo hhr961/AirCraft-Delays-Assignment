@@ -1,0 +1,318 @@
+---
+title: "st2195"
+output: pdf_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+## R Markdown
+
+This is an R Markdown document. Markdown is a simple formatting syntax for authoring HTML, PDF, and MS Word documents. For more details on using R Markdown see <http://rmarkdown.rstudio.com>.
+
+When you click the **Knit** button a document will be generated that includes both content as well as the output of any embedded R code chunks within the document. You can embed an R code chunk like this:
+
+```{r cars}
+summary(cars)
+```
+
+## Including Plots
+
+You can also embed plots, for example:
+
+```{r pressure, echo=FALSE}
+plot(pressure)
+```
+
+Note that the `echo = FALSE` parameter was added to the code chunk to prevent printing of the R code that generated the plot.
+
+```{r importing libraries}
+library(DBI)
+library(RSQLite)
+library(ggplot2)
+library(rlang)
+library(dplyr)
+library(tidyr)
+library(lubridate)
+library(mlr3)
+library(mlr3learners)
+library(mlr3pipelines)
+library(mlr3tuning)
+library(skimr)
+library(mlr3viz)
+```
+
+```{r Set Working Directory}
+setwd("~/Desktop/ST2195")
+```
+
+```{r connect to DB}
+conn <- dbConnect(RSQLite::SQLite(), "airline.db")
+```
+
+```{r Create DataBase}
+if (file.exists("airline.db")) 
+  file.remove("airline.db")
+conn <- dbConnect(RSQLite::SQLite(), "airline.db")
+```
+
+```{r Load Data from CSV into DataBase}
+airports <- read.csv("airports.csv", header = TRUE)
+carriers <- read.csv("carriers.csv", header = TRUE)
+planes <- read.csv("plane-data.csv", header = TRUE)
+dbWriteTable(conn, "airports", airports)
+dbWriteTable(conn, "carriers", carriers)
+dbWriteTable(conn, "planes", planes)
+
+for(i in c(1998:1999)) {
+  ontime <- read.csv(paste0(i, ".csv"), header = TRUE)
+  if(i == 1998) {
+    dbWriteTable(conn, "ontime", ontime)
+  } else {
+    dbWriteTable(conn, "ontime", ontime, append = TRUE)
+  }
+}
+```
+
+```{r When is the best time of day to fly to minimise delays?}
+q1 <- dbGetQuery(conn,
+                 "SELECT CRSDepTime, ontime.DepDelay
+FROM ontime
+WHERE ontime.Cancelled = 0 
+AND ontime.Diverted = 0 
+AND ontime.DepDelay > 0
+ORDER BY ontime.DepDelay")
+
+# Formatting Time. 
+q1$CRSDepTime <- sprintf("%04d", q1$CRSDepTime)
+format(strptime(q1$CRSDepTime, format="%H%M"), format = "%H:%M")
+
+#Group by Hours
+G1a = q1 %>% 
+  mutate(Time = hour(as.POSIXct(strptime(q1$CRSDepTime, "%H"))))  %>% 
+  group_by(Time) %>%
+  summarise(meanDepDelay = mean(DepDelay))
+
+#Bar Graph
+ggplot(G1a, aes((x=Time), y=meanDepDelay)) + 
+         geom_bar(stat = 'identity', color = 'lightblue', fill = 'lightblue') + 
+         labs(title = "Best Time of the Day to Travel", x = "Hours", y = "Average Delay")
+```
+
+```{r When is the Best day of the week to fly to minimise delays?}
+q2 <- dbGetQuery(conn,
+                 "SELECT DayOfWeek AS Day, AVG(ontime.DepDelay) AS avg_delay
+FROM ontime
+WHERE ontime.Cancelled = 0 
+AND ontime.Diverted = 0 
+AND ontime.DepDelay > 0
+GROUP BY Day
+ORDER BY Day")
+
+#converting Day numbers to Day Name abbreviation
+myDay <- c("Monday","Tuesday","Wednesday","Thursday","Friday","Saturday","Sunday")
+q2$DayAbb <- myDay[q2$Day]
+
+#Bar graph
+ggplot(q2, aes(x=reorder(DayAbb, Day), y=avg_delay)) + 
+         geom_bar(stat = 'identity', color = 'lightblue', fill = 'lightblue') + 
+         labs(title = "Best Day of the Week to Travel", x = "Day", y = "Average Delay")
+
+#Pie chart - come back and figure it out again
+require(RColorBrewer)
+pct = round(q2[,2]/sum(q2[,2])*100)
+new_pct = paste(myDay, "-", pct, "%", sep = "")
+pie(q2[,2], labels = new_pct, main = "Best Day of the Week to Travel", col = rainbow(7))
+
+
+```
+
+```{r When is the best time of year to fly to minimise delays?}
+q3 <- dbGetQuery(conn,
+                 "SELECT Month, AVG(ontime.DepDelay) AS avg_delay
+FROM ontime
+WHERE ontime.Cancelled = 0 
+AND ontime.Diverted = 0 
+AND ontime.DepDelay > 0
+GROUP BY Month
+ORDER BY Month")
+
+#converting Month numbers to Month Name abbreviation
+mymonths <- c("Jan","Feb","Mar","Apr","May","Jun","Jul","Aug","Sep","Oct","Nov","Dec")
+q3$MonthAbb <- mymonths[q3$Month]
+
+#Bar graph
+ggplot(q3, aes(x=reorder(MonthAbb, Month), y=avg_delay)) + 
+         geom_bar(stat = 'identity', color = 'lightblue', fill = 'lightblue') + 
+         labs(title = "Best Month of the Year to Travel", x = "Months", y = "Average Delay")
+
+#Pie chart - come back and figure it out again
+require(RColorBrewer)
+pct = round(q3[,2]/sum(q3[,2])*100)
+new_pct = paste(mymonths, "-", pct, "%", sep = "")
+pie(q3[,2], labels = new_pct, main = "Best Month of the Year to Travel", col = rainbow(12))
+```
+
+```{r Do older planes suffer more delays?}
+q4 <- dbGetQuery(conn, 
+                 "SELECT planes.year AS engineyear, AVG(ontime.DepDelay) AS avg_delay
+From planes JOIN ontime USING(tailnum)
+WHERE ontime.Cancelled = 0
+AND ontime.Diverted = 0
+AND ontime.DepDelay > 0
+AND ontime.CarrierDelay IS NULL
+AND ontime.WeatherDelay IS NULL
+AND ontime.NASDelay IS NULL
+AND ontime.SecurityDelay IS NULL
+AND ontime.LateAircraftDelay IS NULL
+AND engineyear != 'None'
+AND engineyear > 0
+AND engineyear < 2000
+GROUP BY engineyear
+ORDER BY engineyear DESC")
+
+# find the age of the engines
+num = as.numeric(q4$engineyear)
+q4a = q4$age <- (1999 - num) 
+
+
+# plotting the data
+#scattered plot graph
+plot(q4$age, q4$avg_delay, xlab = "Age", ylab = "Average Delay", main = "Correlation of Age and Delays")
+abline(lm(q4$avg_delay~q4$age))
+```
+
+
+```{r How does the number of people flying between different locations change over time?}
+q5 <- dbGetQuery(conn, 
+                 "SELECT Month, Year
+From ontime
+WHERE Cancelled = 0
+AND ontime.Diverted = 0
+AND ontime.ArrDelay > 0
+ORDER BY Month, Year")
+
+# Drop all NA
+q5 <- drop_na(q5)
+
+#count the number of flights
+q5 = q5 %>% count(Month, Year)
+
+
+#combining month and year as date
+q5$Date <- paste(q5$Month, "-", q5$Year)
+
+
+#order by date
+q5 <- q5[order(q5$Year, q5$Month), ] 
+
+#show the change over time
+a = q5 %>% mutate(PercentageDifferent = (n - lag(n))/n * 100)
+a
+
+#time graph
+q5$Date <- factor(q5$Date, levels = q5$Date)
+p <- ggplot(q5, aes(Date, n, group = 1)) +
+       geom_line() + geom_line() + labs(x = "Date", y = "Flights", title = "Flights Changes Over Time")
+p + theme(axis.text.x = element_text(angle = 60, hjust = 1))
+```
+
+
+```{r Can you detect cascading failures as delays in one airport create delays in others?}
+q6 <- dbGetQuery(conn,
+                 "SELECT CRSDepTime, DepDelay, Origin, Dest, Year, Month, DayofWeek
+FROM ontime
+WHERE Cancelled = 0 
+AND Diverted = 0 
+AND DepDelay > 0
+ORDER BY DayofWeek, Month, Year")
+
+# filtering out columns to check
+y <- filter(q6, Dest == "PHX")
+u <- filter(q6, Origin == "PHX")
+
+#print
+y
+u
+
+
+```
+
+```{r Use the available variables to construct a model that predicts delays.}
+q7 <- dbGetQuery(conn, 
+                 "SELECT ontime.DepDelay, planes.year AS engineyear, ontime.TailNum, ontime.DayofMonth, ontime.Month
+From planes JOIN ontime USING(tailnum)
+WHERE ontime.Cancelled = 0 
+AND ontime.Diverted = 0 ")
+
+
+# Change to 1/0
+q7 <- q7 %>% mutate(delay=ifelse(DepDelay > 0,1,0))
+
+#drop depdelay
+q7 = subset(q7, select = -c(DepDelay))
+
+# Change empty cell to NA
+q7 <- q7 %>% mutate_all(na_if,"")
+
+
+# Drop all NA
+q7 <- drop_na(q7)
+
+
+#convert to factors if required
+q7$delay <- factor(q7$delay)
+q7$TailNum <- factor(q7$TailNum)
+q7$engineyear <- factor(q7$engineyear)
+q7$DayofMonth <- factor(q7$DayofMonth)
+q7$Month <- factor(q7$Month)
+#get the training and test sets
+n <- nrow(q7)
+train_set <- sample(n, round(0.5*n))
+test_set <- setdiff(1:n, train_set)
+#setup the task
+task <- TaskClassif$new('delay', backend=q7, target = 'delay')
+measure <- msr('classif.ce')
+task
+#some of the variables are factor for which some methods do not support factor, so we need to convert them to numerical values. (The following will be used later.)
+fencoder <- po("encode", method = "treatment",
+  affect_columns = selector_type("factor"))
+ord_to_int <- po("colapply", applicator = as.integer,
+  affect_columns = selector_type("ordered"))
+
+#some methods require tuning the hyper parameters. (The following will be used later.)
+tuner <- tnr('grid_search')
+terminator <- trm('evals', n_evals = 20)
+
+#extend the results with different classification
+
+# only classification trees will be included due to vector memory exhausted.
+
+#classification trees
+learner_tree <- lrn("classif.rpart")
+
+gc_tree <- po('imputemean') %>>%
+  po(learner_tree)
+glrn_tree <- GraphLearner$new(gc_tree)
+
+glrn_tree$train(task, row_ids = train_set)
+glrn_tree$predict(task, row_ids = test_set)$score()
+
+set.seed(1) # for reproducible results
+# list of learners
+lrn_list <- list(
+  glrn_tree
+)
+# set the benchmark design and run the comparisons
+bm_design <- benchmark_grid(task = task, resamplings = rsmp('cv', folds = 3), learners = lrn_list)
+bmr <- benchmark(bm_design, store_models = TRUE)
+
+autoplot(bmr) + theme(axis.text.x = element_text(angle = 45, hjust = 1))
+
+bmr$aggregate(measure)
+
+```
+
+
+
